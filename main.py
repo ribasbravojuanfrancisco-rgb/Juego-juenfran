@@ -17,12 +17,44 @@ FPS = 60
 MAPA_ANCHO, MAPA_ALTO = 2400, 1400
 MUNDO = pygame.Surface((MAPA_ANCHO, MAPA_ALTO))
 
-RUTA_FONDO = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "imagenes",
-    "Fondofrantanks.png"
-)
+CARPETA_IMAGENES = r"C:\Users\PC\Frantanks1.py\imagenes"
 
+RUTA_FONDO = os.path.join(CARPETA_IMAGENES, "Fondofrantanks.png")
+RUTA_TANQUE_FRAN = os.path.join(CARPETA_IMAGENES, "Tanque_Fran.png")
+RUTA_TANQUE_ENEMIGO = os.path.join(CARPETA_IMAGENES, "Tanque_enemigo.png")
+
+# Cargamos los sprites con transparencia.
+TANQUE_FRAN_IMAGEN = pygame.image.load(RUTA_TANQUE_FRAN).convert_alpha()
+TANQUE_ENEMIGO_IMAGEN = pygame.image.load(RUTA_TANQUE_ENEMIGO).convert_alpha()
+
+# Tamaño máximo de los tanques en el mundo del juego.
+# Se aumenta bastante el tamaño y se conserva la proporción original.
+TANQUE_IMAGEN_ANCHO = 255
+TANQUE_IMAGEN_ALTO = 180
+
+
+def escalar_tanque(imagen):
+    ancho_original, alto_original = imagen.get_size()
+    escala = min(
+        TANQUE_IMAGEN_ANCHO / ancho_original,
+        TANQUE_IMAGEN_ALTO / alto_original
+    )
+    nuevo_tamano = (
+        max(1, int(ancho_original * escala)),
+        max(1, int(alto_original * escala))
+    )
+    # Escalado por vecino más cercano: conserva nítidos los píxeles del sprite.
+    return pygame.transform.scale(imagen, nuevo_tamano)
+
+
+TANQUE_FRAN_IMAGEN = escalar_tanque(TANQUE_FRAN_IMAGEN)
+TANQUE_ENEMIGO_IMAGEN = escalar_tanque(TANQUE_ENEMIGO_IMAGEN)
+
+# El enemigo está a la derecha: lo volteamos horizontalmente para que mire
+# hacia la izquierda, en dirección al tanque de Fran.
+TANQUE_ENEMIGO_IMAGEN = pygame.transform.flip(
+    TANQUE_ENEMIGO_IMAGEN, True, False
+)
 
 FONDO_BATALLA = pygame.image.load(RUTA_FONDO).convert()
 FONDO_BATALLA = pygame.transform.scale(
@@ -284,10 +316,10 @@ def actualizar_angulo():
     px, py = pygame.mouse.get_pos()
     mx, my = pantalla_a_mundo(px, py)
     if turno_actual == 'JUGADOR':
-        ox, oy = (tanque_x, tanque_y - TANQUE_ALTO)
+        ox, oy = obtener_origen_canon(tanque_x, tanque_y, TANQUE_FRAN_IMAGEN)
         angulo = math.atan2(oy - my, mx - ox)
     else:
-        ox, oy = (enemigo_x, enemigo_y - TANQUE_ALTO)
+        ox, oy = obtener_origen_canon(enemigo_x, enemigo_y, TANQUE_ENEMIGO_IMAGEN)
         angulo_ia = math.atan2(oy - my, mx - ox)
 
 
@@ -353,27 +385,96 @@ def dibujar_terreno():
 #=========================
 
 
-def dibujar_barra_vida(x, y, vida):
-    ancho, alto = (60, 8)
+def obtener_rect_tanque(x, y, imagen):
+    """Coloca la parte visible inferior del tanque justo sobre el terreno.
+
+    Algunos PNG tienen píxeles transparentes alrededor del dibujo. Alinear
+    el rectángulo completo puede dejar el tanque flotando o enterrado; por
+    eso usamos los límites de los píxeles realmente visibles.
+    """
+    limites_visibles = imagen.get_bounding_rect(min_alpha=1)
+    if limites_visibles.width == 0 or limites_visibles.height == 0:
+        return imagen.get_rect(midbottom=(int(x), int(y)))
+
+    izquierda = int(x - imagen.get_width() / 2)
+    arriba = int(y - limites_visibles.bottom)
+    return pygame.Rect(izquierda, arriba, imagen.get_width(), imagen.get_height())
+
+
+def obtener_hitbox_tanque(x, y, imagen, es_enemigo=False):
+    """Hitbox basada en el cuerpo visible del sprite, no en el tamaño antiguo 60x30."""
+    rect_sprite = obtener_rect_tanque(x, y, imagen)
+    visible = imagen.get_bounding_rect(min_alpha=1)
+    hitbox = pygame.Rect(
+        rect_sprite.left + visible.left,
+        rect_sprite.top + visible.top,
+        visible.width,
+        visible.height
+    )
+
+    # Se reduce un poco el contorno para no contar el cañón ni píxeles sueltos
+    # como parte del cuerpo del tanque.
+    margen_x = max(2, int(hitbox.width * 0.07))
+    margen_superior = int(hitbox.height * 0.22)
+    margen_inferior = max(1, int(hitbox.height * 0.04))
+    hitbox.left += margen_x
+    hitbox.width = max(1, hitbox.width - 2 * margen_x)
+    hitbox.top += margen_superior
+    hitbox.height = max(1, hitbox.height - margen_superior - margen_inferior)
+
+    # El sprite enemigo se dibuja 2 px más abajo para que las orugas toquen suelo.
+    if es_enemigo:
+        hitbox.y += 2
+    return hitbox
+
+
+def proyectil_intersecta_hitbox(px, py, x, y, imagen, es_enemigo=False):
+    hitbox = obtener_hitbox_tanque(x, y, imagen, es_enemigo)
+    punto_cercano_x = max(hitbox.left, min(px, hitbox.right))
+    punto_cercano_y = max(hitbox.top, min(py, hitbox.bottom))
+    return math.hypot(px - punto_cercano_x, py - punto_cercano_y) <= RADIO_PROYECTIL
+
+
+def obtener_origen_canon(x, y, imagen):
+    """Coloca el origen del cañón en la zona visible de la torreta."""
+    rect = obtener_rect_tanque(x, y, imagen)
+    limites_visibles = imagen.get_bounding_rect(min_alpha=1)
+    centro_torreta_y = (
+        rect.top + limites_visibles.top + limites_visibles.height * 0.43
+    )
+    return (float(x), float(centro_torreta_y))
+
+
+def dibujar_barra_vida(x, y, vida, ancho=110):
+    alto = 11
     vida = max(0, min(vida, VIDA_MAXIMA))
-    pygame.draw.rect(MUNDO, GRIS, (int(x - ancho / 2), int(y), ancho, alto))
-    pygame.draw.rect(MUNDO, ROJO, (int(x - ancho / 2), int(y), int(ancho * vida / VIDA_MAXIMA), alto))
+    fondo = pygame.Rect(int(x - ancho / 2), int(y), ancho, alto)
+    pygame.draw.rect(MUNDO, NEGRO, fondo.inflate(4, 4), border_radius=3)
+    pygame.draw.rect(MUNDO, GRIS, fondo, border_radius=2)
+    relleno = fondo.copy()
+    relleno.width = int(ancho * vida / VIDA_MAXIMA)
+    if relleno.width > 0:
+        pygame.draw.rect(MUNDO, ROJO, relleno, border_radius=2)
 
 
 def dibujar_tanque():
-    pygame.draw.rect(MUNDO, VERDE, (int(tanque_x - TANQUE_ANCHO / 2), int(tanque_y - TANQUE_ALTO), TANQUE_ANCHO, TANQUE_ALTO))
-    pygame.draw.circle(MUNDO, NEGRO, (int(tanque_x - 20), int(tanque_y)), 10)
-    pygame.draw.circle(MUNDO, NEGRO, (int(tanque_x + 20), int(tanque_y)), 10)
-    dibujar_barra_vida(tanque_x, tanque_y - TANQUE_ALTO - 15, vida_tanque)
+    rect_tanque = obtener_rect_tanque(tanque_x, tanque_y, TANQUE_FRAN_IMAGEN)
+    MUNDO.blit(TANQUE_FRAN_IMAGEN, rect_tanque)
+    limites_visibles = TANQUE_FRAN_IMAGEN.get_bounding_rect(min_alpha=1)
+    parte_superior_visible = rect_tanque.top + limites_visibles.top
+    dibujar_barra_vida(tanque_x, parte_superior_visible - 25, vida_tanque)
 
 
 def dibujar_enemigo():
     if vida_enemigo <= 0:
         return
-    pygame.draw.rect(MUNDO, ROJO, (int(enemigo_x - TANQUE_ANCHO / 2), int(enemigo_y - TANQUE_ALTO), TANQUE_ANCHO, TANQUE_ALTO))
-    pygame.draw.circle(MUNDO, NEGRO, (int(enemigo_x - 20), int(enemigo_y)), 10)
-    pygame.draw.circle(MUNDO, NEGRO, (int(enemigo_x + 20), int(enemigo_y)), 10)
-    dibujar_barra_vida(enemigo_x, enemigo_y - TANQUE_ALTO - 15, vida_enemigo)
+    rect_enemigo = obtener_rect_tanque(enemigo_x, enemigo_y, TANQUE_ENEMIGO_IMAGEN)
+    # Pequeño ajuste visual para apoyar las orugas sobre el terreno.
+    rect_enemigo.y += 2
+    MUNDO.blit(TANQUE_ENEMIGO_IMAGEN, rect_enemigo)
+    limites_visibles = TANQUE_ENEMIGO_IMAGEN.get_bounding_rect(min_alpha=1)
+    parte_superior_visible = rect_enemigo.top + limites_visibles.top
+    dibujar_barra_vida(enemigo_x, parte_superior_visible - 25, vida_enemigo)
 
 #=========================
 # CAÑONES Y APUNTADO VISUAL
@@ -381,20 +482,22 @@ def dibujar_enemigo():
 
 
 def obtener_punta_canon(x, y, ang):
-    ox, oy = (x, y - TANQUE_ALTO)
+    imagen = TANQUE_FRAN_IMAGEN if abs(x - tanque_x) <= abs(x - enemigo_x) else TANQUE_ENEMIGO_IMAGEN
+    ox, oy = obtener_origen_canon(x, y, imagen)
     return (ox, oy, ox + math.cos(ang) * CAÑON_LARGO, oy - math.sin(ang) * CAÑON_LARGO)
 
 
 def dibujar_canon(x, y, ang):
     ox, oy, px, py = obtener_punta_canon(x, y, ang)
-    pygame.draw.line(MUNDO, NEGRO, (int(ox), int(oy)), (int(px), int(py)), 8)
+    pygame.draw.line(MUNDO, NEGRO, (int(ox), int(oy)), (int(px), int(py)), 9)
+    pygame.draw.circle(MUNDO, NEGRO, (int(ox), int(oy)), 6)
 
 
 def dibujar_angulo():
-    ox, oy = (tanque_x, tanque_y - TANQUE_ALTO)
+    ox, oy = obtener_origen_canon(tanque_x, tanque_y, TANQUE_FRAN_IMAGEN)
     for i in range(1, 9):
-        px = ox + math.cos(angulo) * 18 * i
-        py = oy - math.sin(angulo) * 18 * i
+        px = ox + math.cos(angulo) * 22 * i
+        py = oy - math.sin(angulo) * 22 * i
         pygame.draw.circle(MUNDO, BLANCO, (int(px), int(py)), 3)
 
 #=========================
@@ -489,32 +592,30 @@ def calcular_dano():
     return max(1, int(rapidez * MULTIPLICADOR_DAÑO))
 
 
-def proyectil_toca_tanque(x, y):
-    return (
-        proyectil_x + RADIO_PROYECTIL >= x - TANQUE_ANCHO / 2
-        and proyectil_x - RADIO_PROYECTIL <= x + TANQUE_ANCHO / 2
-        and proyectil_y + RADIO_PROYECTIL >= y - TANQUE_ALTO
-        and proyectil_y - RADIO_PROYECTIL <= y
+def proyectil_toca_tanque(x, y, es_enemigo=False):
+    imagen = TANQUE_ENEMIGO_IMAGEN if es_enemigo else TANQUE_FRAN_IMAGEN
+    return proyectil_intersecta_hitbox(
+        proyectil_x, proyectil_y, x, y, imagen, es_enemigo
     )
 
 
 def comprobar_impacto_tanque():
     global vida_enemigo, vida_tanque, quemadura_tanque, quemadura_enemigo
-    if proyectil_de == 'JUGADOR' and vida_enemigo > 0 and proyectil_toca_tanque(enemigo_x, enemigo_y):
+    if proyectil_de == 'JUGADOR' and vida_enemigo > 0 and proyectil_toca_tanque(enemigo_x, enemigo_y, True):
         vida_enemigo = max(0, vida_enemigo - calcular_dano())
         registrar_dano_jugador('JUGADOR')
         if tipo_proyectil == 'INCENDIARIA':
             quemadura_enemigo = max(quemadura_enemigo, 2)
             crear_zona_fuego(enemigo_x)
         return True
-    if modo_juego == 'MULTIPLAYER' and proyectil_de == 'JUGADOR2' and (vida_tanque > 0) and proyectil_toca_tanque(tanque_x, tanque_y):
+    if modo_juego == 'MULTIPLAYER' and proyectil_de == 'JUGADOR2' and (vida_tanque > 0) and proyectil_toca_tanque(tanque_x, tanque_y, False):
         vida_tanque = max(0, vida_tanque - calcular_dano())
         registrar_dano_jugador('JUGADOR2')
         if tipo_proyectil == 'INCENDIARIA':
             quemadura_tanque = max(quemadura_tanque, 2)
             crear_zona_fuego(tanque_x)
         return True
-    if modo_juego == 'SINGLEPLAYER' and proyectil_de == 'IA' and (vida_tanque > 0) and proyectil_toca_tanque(tanque_x, tanque_y):
+    if modo_juego == 'SINGLEPLAYER' and proyectil_de == 'IA' and (vida_tanque > 0) and proyectil_toca_tanque(tanque_x, tanque_y, False):
         vida_tanque = max(0, vida_tanque - calcular_dano())
         if tipo_proyectil == 'INCENDIARIA':
             quemadura_tanque = max(quemadura_tanque, 2)
@@ -581,12 +682,11 @@ def terminar_proyectil():
 
 
 def _impacto_rect_tanque(x, y, tanque_centro_x, tanque_base_y):
-    """Comprueba si una coordenada circular toca el rectángulo de un tanque."""
-    return (
-        x + RADIO_PROYECTIL >= tanque_centro_x - TANQUE_ANCHO / 2
-        and x - RADIO_PROYECTIL <= tanque_centro_x + TANQUE_ANCHO / 2
-        and y + RADIO_PROYECTIL >= tanque_base_y - TANQUE_ALTO
-        and y - RADIO_PROYECTIL <= tanque_base_y
+    """Comprueba el impacto contra la hitbox real del sprite correspondiente."""
+    es_enemigo = abs(tanque_centro_x - enemigo_x) <= abs(tanque_centro_x - tanque_x)
+    imagen = TANQUE_ENEMIGO_IMAGEN if es_enemigo else TANQUE_FRAN_IMAGEN
+    return proyectil_intersecta_hitbox(
+        x, y, tanque_centro_x, tanque_base_y, imagen, es_enemigo
     )
 
 
@@ -1149,9 +1249,9 @@ while ejecutando:
             if turno_actual == 'JUGADOR':
                 dibujar_angulo()
             else:
-                ox, oy = (enemigo_x, enemigo_y - TANQUE_ALTO)
+                ox, oy = obtener_origen_canon(enemigo_x, enemigo_y, TANQUE_ENEMIGO_IMAGEN)
                 for i in range(1, 9):
-                    pygame.draw.circle(MUNDO, BLANCO, (int(ox + math.cos(angulo_ia) * 18 * i), int(oy - math.sin(angulo_ia) * 18 * i)), 3)
+                    pygame.draw.circle(MUNDO, BLANCO, (int(ox + math.cos(angulo_ia) * 22 * i), int(oy - math.sin(angulo_ia) * 22 * i)), 3)
         if proyectil_activo:
             color = BLANCO if proyectil_de in ('JUGADOR', 'JUGADOR2') else AMARILLO
             if tipo_proyectil == "GRANADA":
